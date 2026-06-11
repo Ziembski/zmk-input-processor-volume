@@ -1,0 +1,11 @@
+# Copyright (c) 2024 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+config ZMK_INPUT_PROCESSOR_VOLUME
+    bool "Volume Input Processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_VOLUME_ENABLED
+    help
+      Enables the volume input processor which converts continuous REL
+      axis motion (e.g. from a trackball) into C_VOL_UP / C_VOL_DN
+      key presses using a signed accumulator with configurable threshold.

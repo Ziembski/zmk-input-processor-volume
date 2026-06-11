@@ -1,0 +1,67 @@
+# Copyright (c) 2024 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: |
+  Input processor that converts continuous REL axis motion into
+  C_VOL_UP / C_VOL_DN key presses.
+
+  Accumulates signed REL counts and fires one behavior press+release
+  each time the accumulator crosses ±tick. Remainder is preserved
+  between events — no counts are lost.
+
+  Example usage in an overlay:
+
+    #include <zephyr/dt-bindings/input/input-event-codes.h>
+    #include <dt-bindings/zmk/keys.h>
+
+    / {
+        zip_vol: zip_vol {
+            compatible = "zmk,input-processor-volume";
+            #input-processor-cells = <0>;
+            type = <INPUT_EV_REL>;
+            y-input-code = <INPUT_REL_Y>;
+            tick = <30>;
+            y-invert;
+            bindings = <&kp C_VOL_UP>, <&kp C_VOL_DN>;
+        };
+    };
+
+compatible: "zmk,input-processor-volume"
+
+# ip_zero_param.yaml is the correct base for input processors that take
+# no runtime parameters (i.e. #input-processor-cells = <0>).
+# It inherits ip_common.yaml which provides track-remainders.
+include: ip_zero_param.yaml
+
+properties:
+  type:
+    type: int
+    description: Input event type to watch (INPUT_EV_REL = 2). Default is set in C via DT_INST_PROP_OR.
+
+  y-input-code:
+    type: int
+    default: 1        # INPUT_REL_Y = 1
+    description: |
+      REL input code to treat as the volume axis.
+      Default INPUT_REL_Y (1). Use INPUT_REL_X (0) for horizontal axis.
+
+  tick:
+    type: int
+    default: 30
+    description: |
+      Sensor counts to accumulate before firing one volume step.
+      Higher = coarser. At effective CPI 600, tick=30 ≈ 20 steps per rotation.
+
+  y-invert:
+    type: boolean
+    description: |
+      Negate the incoming axis value before accumulating.
+      Set if rolling the trackball up decreases volume instead of increasing it.
+
+  bindings:
+    type: phandle-array
+    required: true
+    description: |
+      Exactly 2 behavior bindings:
+        bindings[0] = fired when accumulator reaches +tick  (volume up)
+        bindings[1] = fired when accumulator reaches -tick  (volume down)
