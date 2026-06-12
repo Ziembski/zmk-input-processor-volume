@@ -4,17 +4,21 @@
  *
  * input_processor_volume.c
  *
- * Converts continuous REL_Y trackball motion into C_VOL_UP / C_VOL_DN.
+ * Converts REL_Y trackball motion into C_VOL_UP / C_VOL_DN, while
+ * suppressing cursor movement — without needing a separate zeroing processor.
  *
- * A signed accumulator absorbs every incoming delta.  Each time it crosses
- * ±tick ONE behavior press+release is fired and the threshold is subtracted,
- * preserving the remainder for the next event.
+ * Design mirrors zip_xy_to_scroll_mapper (input_processor_code_mapper.c):
+ * instead of stopping the event or zeroing it, we remap event->code to
+ * INPUT_REL_MISC after consuming the value. handle_rel_code() in the input
+ * listener has no case for INPUT_REL_MISC, so it silently ignores the event —
+ * no cursor movement, no scroll, nothing. Clean and stateless.
  *
- * IMPORTANT: only one step is fired per input event regardless of how large
- * the delta is.  ZMK's event heap is synchronously drained per event; firing
- * multiple raise_zmk_keycode_state_changed calls in a tight loop before the
- * heap can drain causes heap exhaustion and a crash.  At sane CPI values the
- * per-event delta will never exceed one tick anyway.
+ * REL_X is similarly remapped to INPUT_REL_MISC so horizontal movement is
+ * also suppressed on the volume layer, with no remainder bleed between layers.
+ *
+ * Accumulator: signed remainder absorbs every delta. One behavior press+release
+ * fires each time it crosses ±tick. At most one step per input event to avoid
+ * exhausting ZMK's synchronous event heap.
  */
 
 #define DT_DRV_COMPAT zmk_input_processor_volume
@@ -70,30 +74,47 @@ static int volume_handle_event(const struct device *dev,
     const struct volume_config *cfg  = dev->config;
     struct volume_data         *data = dev->data;
 
-    if (event->type != cfg->type || event->code != cfg->y_input_code) {
+    if (event->type != cfg->type) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    int32_t delta = cfg->y_invert ? -(int32_t)event->value : (int32_t)event->value;
-    data->remainder += delta;
+    /* Remap REL_Y: consume value for volume, then remap code to REL_MISC
+     * so handle_rel_code() in the listener ignores it (no cursor movement). */
+    if (event->code == cfg->y_input_code) {
+        int32_t delta = cfg->y_invert ? -(int32_t)event->value : (int32_t)event->value;
+        data->remainder += delta;
 
-    /* Fire at most ONE step per input event to avoid heap exhaustion.
-     * The remainder carries over so no motion is lost. */
-    if (data->remainder >= cfg->tick) {
-        data->remainder -= cfg->tick;
-        int ret = fire_binding(&cfg->bindings[0], cfg, state);
-        if (ret < 0) {
-            LOG_WRN("vol-up binding failed: %d", ret);
+        /* At most one step per event — ZMK's event manager is synchronous;
+         * multiple raise_zmk_keycode_state_changed calls before the heap
+         * drains causes a crash. Remainder carries over losslessly. */
+        if (data->remainder >= cfg->tick) {
+            data->remainder -= cfg->tick;
+            int ret = fire_binding(&cfg->bindings[0], cfg, state); /* vol up */
+            if (ret < 0) {
+                LOG_WRN("vol-up binding failed: %d", ret);
+            }
+        } else if (data->remainder <= -cfg->tick) {
+            data->remainder += cfg->tick;
+            int ret = fire_binding(&cfg->bindings[1], cfg, state); /* vol dn */
+            if (ret < 0) {
+                LOG_WRN("vol-dn binding failed: %d", ret);
+            }
         }
-    } else if (data->remainder <= -cfg->tick) {
-        data->remainder += cfg->tick;
-        int ret = fire_binding(&cfg->bindings[1], cfg, state);
-        if (ret < 0) {
-            LOG_WRN("vol-dn binding failed: %d", ret);
-        }
+
+        /* Remap to REL_MISC — handle_rel_code has no case for it,
+         * so the event is silently dropped without stopping the pipeline. */
+        event->code = INPUT_REL_MISC;
+        return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    return ZMK_INPUT_PROC_STOP;
+    /* Remap REL_X (and any other REL code) to REL_MISC as well,
+     * suppressing horizontal cursor movement on the volume layer. */
+    if (event->code == INPUT_REL_X) {
+        event->code = INPUT_REL_MISC;
+        return ZMK_INPUT_PROC_CONTINUE;
+    }
+
+    return ZMK_INPUT_PROC_CONTINUE;
 }
 
 static const struct zmk_input_processor_driver_api volume_driver_api = {
