@@ -4,15 +4,17 @@
  *
  * input_processor_volume.c
  *
- * Input processor that converts continuous REL_Y (or REL_X) trackball motion
- * into C_VOL_UP / C_VOL_DN key presses.
- *
- * Design mirrors input_processor_scaler.c (remainder accumulation) combined
- * with input_processor_behaviors.c (zmk_behavior_invoke_binding dispatch).
+ * Converts continuous REL_Y trackball motion into C_VOL_UP / C_VOL_DN.
  *
  * A signed accumulator absorbs every incoming delta.  Each time it crosses
- * ±tick the processor fires the appropriate binding and subtracts the
- * threshold, preserving the remainder for the next event.
+ * ±tick ONE behavior press+release is fired and the threshold is subtracted,
+ * preserving the remainder for the next event.
+ *
+ * IMPORTANT: only one step is fired per input event regardless of how large
+ * the delta is.  ZMK's event heap is synchronously drained per event; firing
+ * multiple raise_zmk_keycode_state_changed calls in a tight loop before the
+ * heap can drain causes heap exhaustion and a crash.  At sane CPI values the
+ * per-event delta will never exceed one tick anyway.
  */
 
 #define DT_DRV_COMPAT zmk_input_processor_volume
@@ -28,25 +30,19 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/* ── Config (from DT, set at build time) ─────────────────────────────────── */
 struct volume_config {
-    uint8_t  index;           /* processor instance index for virtual key pos  */
-    uint16_t type;            /* INPUT_EV_REL                                   */
-    uint16_t y_input_code;    /* e.g. INPUT_REL_Y                               */
-    int32_t  tick;            /* counts to accumulate before one vol step       */
-    bool     y_invert;        /* flip axis direction                             */
-
-    /* bindings[0] = vol-up binding                                              */
-    /* bindings[1] = vol-dn binding                                              */
+    uint8_t  index;
+    uint16_t type;
+    uint16_t y_input_code;
+    int32_t  tick;
+    bool     y_invert;
     const struct zmk_behavior_binding *bindings;
 };
 
-/* ── Runtime data (mutable per instance) ─────────────────────────────────── */
 struct volume_data {
-    int32_t remainder;        /* leftover counts after last threshold crossing  */
+    int32_t remainder;
 };
 
-/* ── Helper: invoke a binding as a momentary press + release ────────────── */
 static int fire_binding(const struct zmk_behavior_binding *binding,
                         const struct volume_config *cfg,
                         struct zmk_input_processor_state *state) {
@@ -59,7 +55,6 @@ static int fire_binding(const struct zmk_behavior_binding *binding,
 #endif
     };
 
-    /* zmk_behavior_invoke_binding third arg is bool pressed */
     int ret = zmk_behavior_invoke_binding(binding, ev, true);
     if (ret < 0) {
         return ret;
@@ -67,16 +62,14 @@ static int fire_binding(const struct zmk_behavior_binding *binding,
     return zmk_behavior_invoke_binding(binding, ev, false);
 }
 
-/* ── Main event handler ──────────────────────────────────────────────────── */
 static int volume_handle_event(const struct device *dev,
                                struct input_event *event,
-                               uint32_t param1,    /* unused */
-                               uint32_t param2,    /* unused */
+                               uint32_t param1,
+                               uint32_t param2,
                                struct zmk_input_processor_state *state) {
     const struct volume_config *cfg  = dev->config;
     struct volume_data         *data = dev->data;
 
-    /* Only handle the configured event type and axis code */
     if (event->type != cfg->type || event->code != cfg->y_input_code) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
@@ -84,30 +77,25 @@ static int volume_handle_event(const struct device *dev,
     int32_t delta = cfg->y_invert ? -(int32_t)event->value : (int32_t)event->value;
     data->remainder += delta;
 
-    /* Fire as many steps as the accumulator contains */
-    while (data->remainder >= cfg->tick) {
+    /* Fire at most ONE step per input event to avoid heap exhaustion.
+     * The remainder carries over so no motion is lost. */
+    if (data->remainder >= cfg->tick) {
         data->remainder -= cfg->tick;
-        int ret = fire_binding(&cfg->bindings[0], cfg, state); /* vol up */
+        int ret = fire_binding(&cfg->bindings[0], cfg, state);
         if (ret < 0) {
             LOG_WRN("vol-up binding failed: %d", ret);
         }
-    }
-    while (data->remainder <= -cfg->tick) {
+    } else if (data->remainder <= -cfg->tick) {
         data->remainder += cfg->tick;
-        int ret = fire_binding(&cfg->bindings[1], cfg, state); /* vol dn */
+        int ret = fire_binding(&cfg->bindings[1], cfg, state);
         if (ret < 0) {
             LOG_WRN("vol-dn binding failed: %d", ret);
         }
     }
 
-    /*
-     * Stop propagation — prevents the raw REL_Y event from also moving
-     * the cursor while the volume layer is active.
-     */
     return ZMK_INPUT_PROC_STOP;
 }
 
-/* ── Driver API ──────────────────────────────────────────────────────────── */
 static const struct zmk_input_processor_driver_api volume_driver_api = {
     .handle_event = volume_handle_event,
 };
@@ -118,13 +106,12 @@ static int volume_init(const struct device *dev) {
     return 0;
 }
 
-/* ── Per-instance instantiation macro ───────────────────────────────────── */
 #define VOLUME_INST(n)                                                          \
     static struct volume_data volume_data_##n = {};                             \
                                                                                 \
     static const struct zmk_behavior_binding volume_bindings_##n[] = {         \
-        ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(n)),  /* vol up */           \
-        ZMK_KEYMAP_EXTRACT_BINDING(1, DT_DRV_INST(n)),  /* vol dn */           \
+        ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(n)),                         \
+        ZMK_KEYMAP_EXTRACT_BINDING(1, DT_DRV_INST(n)),                         \
     };                                                                          \
                                                                                 \
     static const struct volume_config volume_config_##n = {                    \
